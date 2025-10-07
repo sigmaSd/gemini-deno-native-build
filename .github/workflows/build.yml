@@ -1,0 +1,140 @@
+
+name: Build Gemini CLI Executables
+
+on:
+  repository_dispatch:
+    types: [upstream-commit]
+  workflow_dispatch:
+  schedule:
+    # Check for new commits every 6 hours
+    - cron: '0 */6 * * *'
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      should-build: ${{ steps.check.outputs.should-build }}
+      commit-sha: ${{ steps.check.outputs.commit-sha }}
+    steps:
+      - name: Check for new commits
+        id: check
+        run: |
+          # Get latest commit from upstream
+          LATEST_SHA=$(curl -s https://api.github.com/repos/google-gemini/gemini-cli/commits/main | jq -r .sha)
+          echo "Latest upstream SHA: $LATEST_SHA"
+          
+          # Check if we've already built this commit
+          LAST_BUILT_SHA=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.body // "" | match("Built from commit: ([a-f0-9]+)") | .captures[0].string // ""')
+          echo "Last built SHA: $LAST_BUILT_SHA"
+          
+          if [ "$LATEST_SHA" != "$LAST_BUILT_SHA" ]; then
+            echo "should-build=true" >> $GITHUB_OUTPUT
+            echo "commit-sha=$LATEST_SHA" >> $GITHUB_OUTPUT
+          else
+            echo "should-build=false" >> $GITHUB_OUTPUT
+            echo "No new commits detected"
+          fi
+
+  build:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should-build == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout upstream repository
+        uses: actions/checkout@v4
+        with:
+          repository: google-gemini/gemini-cli
+          ref: ${{ needs.check-upstream.outputs.commit-sha }}
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      
+      - name: Install dependencies
+        run: make install
+      
+      - name: Build project
+        run: make build
+      
+      - name: Bundle project
+        run: npm run bundle
+      
+      - name: Remove package.json
+        run: rm package.json
+      
+      - name: Create env file
+        run: echo "GEMINI_CLI_NO_RELAUNCH=true" > env
+      
+      - name: Compile executables for all targets
+        run: |
+          mkdir -p dist
+          
+          # Define all targets
+          targets=(
+            "aarch64-apple-darwin"
+            "aarch64-unknown-linux-gnu"
+            "x86_64-apple-darwin"
+            "x86_64-pc-windows-msvc"
+            "x86_64-unknown-linux-gnu"
+          )
+          
+          # Compile for each target
+          for target in "${targets[@]}"; do
+            echo "Compiling for $target..."
+            if [[ "$target" == *"windows"* ]]; then
+              output_name="gemini-${target}.exe"
+            else
+              output_name="gemini-${target}"
+            fi
+            DENO_COMPAT=1 deno compile -A --env-file=env --no-check --target=$target --output=dist/$output_name bundle/gemini.js
+          done
+          
+          # List compiled binaries
+          ls -lah dist/
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-cli-binaries
+          path: dist/*
+          retention-days: 1
+
+  release:
+    needs: [check-upstream, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+      
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find binaries -type f -exec cp {} release-assets/ \;
+          ls -lah release-assets/
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Gemini CLI Build ${{ github.run_number }}
+          body: |
+            Automated build of gemini-cli
+            Built from commit: ${{ needs.check-upstream.outputs.commit-sha }}
+            
+            **Download the appropriate binary for your platform:**
+            - Linux x64: `gemini-x86_64-unknown-linux-gnu`
+            - Linux ARM64: `gemini-aarch64-unknown-linux-gnu`
+            - macOS x64 (Intel): `gemini-x86_64-apple-darwin`
+            - macOS ARM64 (Apple Silicon): `gemini-aarch64-apple-darwin`
+            - Windows x64: `gemini-x86_64-pc-windows-msvc.exe`
+          files: release-assets/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
