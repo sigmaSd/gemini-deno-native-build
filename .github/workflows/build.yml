@@ -36,7 +36,7 @@ jobs:
 
   build:
     needs: check-upstream
-    if: needs.check-upstream.outputs.should-build == needs.check-upstream.outputs.should-build
+    if: needs.check-upstream.outputs.should-build == "true"
     runs-on: ubuntu-latest
     
     steps:
