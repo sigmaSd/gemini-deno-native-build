@@ -88,7 +88,7 @@ jobs:
             else
               output_name="gemini-${target}"
             fi
-            DENO_COMPAT=1 deno compile -A --include bundle/ --env-file=env --no-check --target=$target --output=dist/$output_name bundle/gemini.js
+            DENO_COMPAT=1 deno compile -A --include bundle/policies --env-file=env --no-check --target=$target --output=dist/$output_name bundle/gemini.js
           done
           
           # List compiled binaries
